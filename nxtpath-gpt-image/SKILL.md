@@ -65,3 +65,4 @@ If none of these yield a key, the script errors with setup guidance. **The API k
 
 - Image generation can take tens of seconds to several minutes; that is normal. On failure the script prints the gateway's error text; `401/403` means a key problem, `404` usually means the key has no image-model permission.
 - One image per run; run again for more.
+- 本地 `--edit` 参考图若超过约 600KB 或长边超过 1280px，会先在临时副本上缩到长边 1024px（仍大于 800KB 则再缩到 768px）并转 JPEG 再上传，不修改用户原文件。无 Pillow 时回退系统自带缩图工具；都不可用则打印提示并仍发送原图。

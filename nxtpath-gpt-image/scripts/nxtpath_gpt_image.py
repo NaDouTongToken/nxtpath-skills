@@ -22,11 +22,15 @@ The API key is never printed or logged.
 """
 
 import argparse
+import atexit
 import base64
 import json
 import os
 import re
+import struct
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -146,6 +150,233 @@ def _grok_config_token():
     )
 
 
+# Empirical thresholds (2026-08-29): a 1.8MB / 1280x1600 PNG was rejected by
+# both grok-video and seedance i2v; the same picture at 768px long-edge / 79KB
+# JPEG passed immediately. Root cause is image size/pixels, not content.
+_DS_TRIGGER_BYTES = 600 * 1024
+_DS_TRIGGER_EDGE = 1280
+_DS_EDGE = 1024
+_DS_EDGE_2 = 768
+_DS_KEEP_UNDER = 800 * 1024
+_DS_JPEG_Q = 85
+_DS_TEMPS = []
+
+
+def _ds_cleanup():
+    for path in _DS_TEMPS:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(_ds_cleanup)
+
+
+def _ds_probe_dims(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+            if head.startswith(b"\x89PNG") and len(head) >= 24:
+                return struct.unpack(">II", head[16:24])
+            if head.startswith(b"GIF8") and len(head) >= 10:
+                w, h = struct.unpack("<HH", head[6:10])
+                return w, h
+            if not head.startswith(b"\xff\xd8"):
+                return None
+            f.seek(2)
+            while True:
+                hdr = f.read(4)
+                if len(hdr) < 4 or hdr[0] != 0xFF:
+                    return None
+                code = hdr[1]
+                seglen = struct.unpack(">H", hdr[2:4])[0]
+                if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                    sof = f.read(max(0, seglen - 2))
+                    if len(sof) >= 5:
+                        h, w = struct.unpack(">HH", sof[1:5])
+                        return w, h
+                    return None
+                f.seek(seglen - 2, os.SEEK_CUR)
+    except OSError:
+        return None
+
+
+def _ds_temp_jpeg():
+    fd, dest = tempfile.mkstemp(prefix="nxtpath-ds-", suffix=".jpg")
+    os.close(fd)
+    try:
+        os.unlink(dest)
+    except OSError:
+        pass
+    _DS_TEMPS.append(dest)
+    return dest
+
+
+def _ds_try_pil(src, dest, edge, quality):
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        im = Image.open(src)
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        w, h = im.size
+        long_edge = max(w, h)
+        if long_edge > edge:
+            scale = float(edge) / long_edge
+            im = im.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.LANCZOS,
+            )
+        im.save(dest, "JPEG", quality=quality, optimize=True)
+        return im.size
+    except Exception:
+        return None
+
+
+def _ds_try_dotnet(src, dest, edge, quality):
+    env = os.environ.copy()
+    env["NXTPATH_DS_SRC"] = os.path.abspath(src)
+    env["NXTPATH_DS_DEST"] = os.path.abspath(dest)
+    env["NXTPATH_DS_EDGE"] = str(int(edge))
+    env["NXTPATH_DS_Q"] = str(int(quality))
+    ps = (
+        "Add-Type -AssemblyName System.Drawing; "
+        "$src = $env:NXTPATH_DS_SRC; $dest = $env:NXTPATH_DS_DEST; "
+        "$edge = [int]$env:NXTPATH_DS_EDGE; $quality = [long]$env:NXTPATH_DS_Q; "
+        "$img = [System.Drawing.Image]::FromFile($src); "
+        "try { "
+        "$m = [Math]::Max($img.Width, $img.Height); $nw = $img.Width; $nh = $img.Height; "
+        "if ($m -gt $edge) { $s = $edge / [double]$m; "
+        "$nw = [Math]::Max(1, [int][Math]::Round($img.Width * $s)); "
+        "$nh = [Math]::Max(1, [int][Math]::Round($img.Height * $s)); } "
+        "$bmp = New-Object System.Drawing.Bitmap $nw, $nh; "
+        "$g = [System.Drawing.Graphics]::FromImage($bmp); "
+        "$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; "
+        "$g.DrawImage($img, 0, 0, $nw, $nh); $g.Dispose(); "
+        "$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | "
+        "Where-Object { $_.MimeType -eq 'image/jpeg' }; "
+        "$ep = New-Object System.Drawing.Imaging.EncoderParameters 1; "
+        "$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter "
+        "([System.Drawing.Imaging.Encoder]::Quality, $quality); "
+        "$bmp.Save($dest, $codec, $ep); $bmp.Dispose(); "
+        "Write-Output ('{0} {1}' -f $nw, $nh); "
+        "} finally { $img.Dispose() }"
+    )
+    try:
+        out = subprocess.check_output(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ps,
+            ],
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        parts = out.decode("utf-8", "replace").strip().split()
+        if len(parts) >= 2:
+            return int(parts[0]), int(parts[1])
+        return _ds_probe_dims(dest)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def _ds_try_sips(src, dest, edge, quality):
+    try:
+        subprocess.check_call(
+            [
+                "sips",
+                "-Z",
+                str(edge),
+                "-s",
+                "format",
+                "jpeg",
+                "-s",
+                "formatOptions",
+                str(quality),
+                src,
+                "--out",
+                dest,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return _ds_probe_dims(dest)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _ds_try_magick(src, dest, edge, quality):
+    geom = "{}x{}>".format(edge, edge)
+    try:
+        subprocess.check_call(
+            ["convert", src, "-resize", geom, "-quality", str(quality), dest],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return _ds_probe_dims(dest)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _ds_resize(src, dest, edge, quality):
+    try:
+        os.unlink(dest)
+    except OSError:
+        pass
+    got = _ds_try_pil(src, dest, edge, quality)
+    if got:
+        return got
+    if sys.platform == "win32":
+        return _ds_try_dotnet(src, dest, edge, quality)
+    if sys.platform == "darwin":
+        return _ds_try_sips(src, dest, edge, quality)
+    return _ds_try_magick(src, dest, edge, quality)
+
+
+def _maybe_downscale_image(path):
+    """Downscale an oversized local image onto a temp JPEG; never overwrite path."""
+    try:
+        nbytes = os.path.getsize(path)
+    except OSError:
+        return path
+    dims = _ds_probe_dims(path)
+    long_edge = max(dims) if dims else 0
+    if nbytes <= _DS_TRIGGER_BYTES and long_edge <= _DS_TRIGGER_EDGE:
+        return path
+    dest = _ds_temp_jpeg()
+    got = _ds_resize(path, dest, _DS_EDGE, _DS_JPEG_Q)
+    if not got or not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+        print(
+            "warning: oversized reference image not downscaled "
+            "(no PIL / System.Drawing / sips / ImageMagick); "
+            "upstream may reject it. Resize long edge to <=1024px and "
+            "re-encode as JPEG first: {}".format(path)
+        )
+        sys.stdout.flush()
+        return path
+    if os.path.getsize(dest) > _DS_KEEP_UNDER:
+        got2 = _ds_resize(path, dest, _DS_EDGE_2, _DS_JPEG_Q)
+        if got2:
+            got = got2
+    new_bytes = os.path.getsize(dest)
+    ow, oh = dims if dims else ("?", "?")
+    nw, nh = got
+    print(
+        "auto-downscaled: {} {}x{} {} bytes -> {}x{} {} bytes JPEG".format(
+            path, ow, oh, nbytes, nw, nh, new_bytes
+        )
+    )
+    sys.stdout.flush()
+    return dest
+
+
 def _multipart(fields, files):
     """Encode multipart/form-data. files: [(name, filename, bytes)]."""
     boundary = uuid.uuid4().hex
@@ -254,8 +485,13 @@ def main():
         images = []
         for path in args.edit:
             try:
-                with open(path, "rb") as f:
-                    images.append((os.path.basename(path), f.read()))
+                send = _maybe_downscale_image(path)
+                with open(send, "rb") as f:
+                    data = f.read()
+                name = os.path.basename(path)
+                if send != path:
+                    name = os.path.splitext(name)[0] + ".jpg"
+                images.append((name, data))
             except OSError as e:
                 sys.exit("error: cannot read --edit file: {}".format(e))
         fields = {"model": args.model, "prompt": args.prompt}

@@ -51,6 +51,7 @@ If none of these yield a key, the script errors with setup guidance. **The API k
 
 ## Notes
 
+- 本地 `--ref` 参考图若超过约 600KB 或长边超过 1280px，会先在临时副本上缩到长边 1024px（仍大于 800KB 则再缩到 768px）并转 JPEG 再上传，不修改用户原文件。无 Pillow 时回退系统自带缩图工具；都不可用则打印提示并仍发送原图。
 - Video generation is slow (minutes). The default timeout is 900 seconds; do not conclude the run is stuck too early.
 - Resolution is only `480p` or `720p`. The gateway requires the field; the script defaults to `480p`.
 - Duration is 1..15 seconds. Omitting `--duration` uses the upstream default.
