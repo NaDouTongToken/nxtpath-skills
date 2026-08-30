@@ -228,7 +228,14 @@ def main():
         description="Generate or edit an image via the Nxtpath gateway."
     )
     parser.add_argument("prompt", help="what to draw, or the edit instruction")
-    parser.add_argument("--edit", metavar="IMAGE", help="edit this image instead of generating")
+    parser.add_argument(
+        "--edit",
+        metavar="IMAGE",
+        action="append",
+        help="edit this image instead of generating; repeatable any number of "
+        "times — the first image is the one being edited, every later one is "
+        "an additional reference image",
+    )
     parser.add_argument("-o", "--output", help="output file path (default: auto-named in cwd)")
     parser.add_argument(
         "--model",
@@ -236,6 +243,7 @@ def main():
         help="image model (default: %(default)s)",
     )
     parser.add_argument("--size", help="e.g. 1024x1024; some lanes decide size upstream and ignore this")
+    parser.add_argument("--quality", help="e.g. high; the gateway reports the tier actually used in the response")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds (default: %(default)s)")
     args = parser.parse_args()
 
@@ -243,22 +251,31 @@ def main():
     print("using key from {}, gateway {}".format(source, root))
 
     if args.edit:
-        try:
-            with open(args.edit, "rb") as f:
-                image_bytes = f.read()
-        except OSError as e:
-            sys.exit("error: cannot read --edit file: {}".format(e))
+        images = []
+        for path in args.edit:
+            try:
+                with open(path, "rb") as f:
+                    images.append((os.path.basename(path), f.read()))
+            except OSError as e:
+                sys.exit("error: cannot read --edit file: {}".format(e))
         fields = {"model": args.model, "prompt": args.prompt}
         if args.size:
             fields["size"] = args.size
+        if args.quality:
+            fields["quality"] = args.quality
+        # Single image keeps the official SDK part name; multiple use the
+        # OpenAI array syntax (repeating "image" is rejected upstream).
+        part_name = "image" if len(images) == 1 else "image[]"
         body, content_type = _multipart(
-            fields, [("image", os.path.basename(args.edit), image_bytes)]
+            fields, [(part_name, name, data) for name, data in images]
         )
         url = root + "/v1/images/edits"
     else:
         payload = {"model": args.model, "prompt": args.prompt}
         if args.size:
             payload["size"] = args.size
+        if args.quality:
+            payload["quality"] = args.quality
         body = json.dumps(payload).encode("utf-8")
         content_type = "application/json"
         url = root + "/v1/images/generations"
@@ -281,6 +298,9 @@ def main():
 
     path = _save(image, args.output)
     print("saved: {} ({} bytes, {:.0f}s)".format(path, len(image), time.time() - started))
+    reported = {k: result[k] for k in ("quality", "size", "output_format") if result.get(k)}
+    if reported:
+        print("reported: " + json.dumps(reported))
     if item.get("revised_prompt"):
         print("revised prompt: " + item["revised_prompt"])
 

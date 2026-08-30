@@ -21,6 +21,18 @@ Edit an existing image (put the edit instruction in the prompt):
 python scripts/nxtpath_gpt_image.py "Make the bicycle blue, leave everything else unchanged" --edit out.png -o edited.png
 ```
 
+Edit with reference images — repeat `--edit` any number of times; the first
+image is the one being edited, all later ones are references the prompt can
+point at by position ("the second image is the style reference, the third is
+the color palette"):
+
+```bash
+python scripts/nxtpath_gpt_image.py "Redraw the first image in the brushwork style of the second image, using the palette of the third" --edit target.png --edit style_ref.png --edit palette.png -o styled.png
+```
+
+The gpt-image upstream accepts up to 16 input images per request; the wire
+format is one `image[]` part per file, in the order given.
+
 The script path resolves relative to this skill's directory (`scripts/nxtpath_gpt_image.py` sits next to SKILL.md). After success, tell the user the printed absolute image path; if the surface supports images, display the file.
 
 ## Parameters
@@ -28,10 +40,11 @@ The script path resolves relative to this skill's directory (`scripts/nxtpath_gp
 | Parameter | Description |
 | --- | --- |
 | `prompt` (required) | What to draw, or the edit instruction for `--edit` |
-| `--edit IMAGE` | Edit that image instead of generating from scratch |
+| `--edit IMAGE` | Edit that image instead of generating from scratch. Repeatable any number of times (upstream cap: 16): the first image is edited, every later one is a reference (style/content/palette), addressed in the prompt by position. Multi-image is sent as OpenAI `image[]` parts; not every lane accepts it — on a 400 about duplicate/unsupported image parameters, retry with `--model codex/gpt-image-2` or fall back to a single `--edit` and describe the references in the prompt |
 | `-o` / `--output` | Output file path; default auto-named by timestamp, extension detected from the actual format |
 | `--model` | Default `openai/gpt-image-2`; override via `--model` or the `NXTPATH_GPT_IMAGE_MODEL` env var |
 | `--size` | e.g. `1024x1024`. Some lanes decide size upstream and ignore this; trust the actual output |
+| `--quality` | e.g. `high`. The gateway may not honour it; the script prints the tier the response actually reports |
 | `--timeout` | Default 600 seconds (image generation is slow; be patient; do not conclude the run is stuck too early) |
 
 ## Gateway & credentials
