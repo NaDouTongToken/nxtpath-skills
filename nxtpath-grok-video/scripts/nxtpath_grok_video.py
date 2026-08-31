@@ -381,6 +381,47 @@ def _maybe_downscale_image(path):
     return dest
 
 
+def _collect_error_tokens(detail):
+    """Flatten code/type/message fields from a gateway error envelope."""
+    parts = [detail or ""]
+    try:
+        doc = json.loads(detail)
+    except (ValueError, TypeError):
+        return parts
+    stack = [doc]
+    depth = 0
+    while stack and depth < 8:
+        obj = stack.pop()
+        depth += 1
+        if isinstance(obj, dict):
+            for key in ("code", "type", "error", "message"):
+                value = obj.get(key)
+                if isinstance(value, (str, int)):
+                    parts.append(str(value))
+                elif isinstance(value, dict):
+                    stack.append(value)
+            data = obj.get("data")
+            if isinstance(data, dict):
+                stack.append(data)
+        elif isinstance(obj, str):
+            parts.append(obj)
+    return parts
+
+
+def _is_quota_429(detail):
+    """True when a 429 is upstream quota, not in-flight concurrency.
+
+    Since router #2188, upstream QUOTA exhaustion also surfaces as 429 with
+    error envelope UPSTREAM_PASSTHROUGH (previously 503).
+    """
+    hay = " ".join(_collect_error_tokens(detail)).upper()
+    if "UPSTREAM_PASSTHROUGH" in hay:
+        return True
+    if "QUOTA" in hay:
+        return True
+    return False
+
+
 def _http_error_exit(exc):
     detail = ""
     try:
@@ -389,10 +430,13 @@ def _http_error_exit(exc):
         pass
     hint = ""
     if exc.code == 429:
-        hint = (
-            "\nhint: one in-flight video job per account per resolution tier; "
-            "wait for the running job to finish, then retry"
-        )
+        if _is_quota_429(detail):
+            hint = "\nhint: 上游配额/余额受限，请稍后再试或联系平台"
+        else:
+            hint = (
+                "\nhint: one in-flight video job per account per resolution tier; "
+                "wait for the running job to finish, then retry"
+            )
     sys.exit("error: HTTP {} from gateway\n{}{}".format(exc.code, detail, hint))
 
 

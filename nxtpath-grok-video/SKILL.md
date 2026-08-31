@@ -58,5 +58,5 @@ If none of these yield a key, the script errors with setup guidance. **The API k
 - Cost is delivered seconds × the per-second rate of the resolution tier, plus a flat per-image charge for each reference image. Rates differ per model — see the pricing page.
 - Up to 14 reference images is a limit, not a promise that multiple images compose. Measured behavior for 2+ images is not established.
 - The mp4 URL is temporary. The script downloads it immediately to the output path.
-- One in-flight job per account per resolution tier. A `429 TOO_MANY_TASKS_IN_FLIGHT` means wait for the running job to finish, then retry.
+- One in-flight job per account per resolution tier. A `429 TOO_MANY_TASKS_IN_FLIGHT` means wait for the running job to finish, then retry. A `429` whose error code/type is `UPSTREAM_PASSTHROUGH` (upstream quota; since router #2188, previously 503) means 上游配额/余额受限，请稍后再试或联系平台. Unknown 429 shapes keep the in-flight wording.
 - On failure the script prints the gateway's error text; `401/403` means a key problem.

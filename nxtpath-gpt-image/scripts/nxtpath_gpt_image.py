@@ -444,14 +444,38 @@ def _detect_ext(data):
     return ".png"
 
 
-def _save(data, output):
-    if not output:
-        output = "nxtpath-gpt-image-{}{}".format(
-            time.strftime("%Y%m%d-%H%M%S"), _detect_ext(data)
-        )
-    with open(output, "wb") as f:
+def _decode_image(item, timeout):
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+    if item.get("url"):
+        with urllib.request.urlopen(item["url"], timeout=timeout) as resp:
+            return resp.read()
+    sys.exit(
+        "error: image entry has neither b64_json nor url:\n"
+        + json.dumps(item)[:400]
+    )
+
+
+def _dest_path(output, index, count, ext, stamp):
+    """One file: -o as given, or a timestamp name.
+
+    Multiple files: suffix -1..-N before the extension when -o is given;
+    timestamp names with the same suffix otherwise.
+    """
+    if output:
+        if count == 1:
+            return output
+        root, out_ext = os.path.splitext(output)
+        return "{}-{}{}".format(root, index, out_ext or ext)
+    if count == 1:
+        return "nxtpath-gpt-image-{}{}".format(stamp, ext)
+    return "nxtpath-gpt-image-{}-{}{}".format(stamp, index, ext)
+
+
+def _save(data, dest):
+    with open(dest, "wb") as f:
         f.write(data)
-    return os.path.abspath(output)
+    return os.path.abspath(dest)
 
 
 def main():
@@ -473,10 +497,28 @@ def main():
         default=os.environ.get("NXTPATH_GPT_IMAGE_MODEL", DEFAULT_MODEL),
         help="image model (default: %(default)s)",
     )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        metavar="N",
+        help="images to generate, 1..10 (generation only; default: %(default)s)",
+    )
     parser.add_argument("--size", help="e.g. 1024x1024; some lanes decide size upstream and ignore this")
     parser.add_argument("--quality", help="e.g. high; the gateway reports the tier actually used in the response")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds (default: %(default)s)")
     args = parser.parse_args()
+
+    if not (1 <= args.n <= 10):
+        sys.exit("error: --n must be 1..10 (got {})".format(args.n))
+    if args.edit and args.n != 1:
+        sys.exit("error: --n is generation-only; not valid with --edit")
+    if args.n > 1 and args.model.lower().startswith("codex/"):
+        sys.exit(
+            "error: --n>1 is not supported for codex/* models (got {}); "
+            "openai/gpt-image-2 (the default) supports n=1..10, "
+            "codex/gpt-image-2 does not (upstream returns 400)".format(args.model)
+        )
 
     root, api_key, source = resolve_credentials()
     print("using key from {}, gateway {}".format(source, root))
@@ -507,7 +549,7 @@ def main():
         )
         url = root + "/v1/images/edits"
     else:
-        payload = {"model": args.model, "prompt": args.prompt}
+        payload = {"model": args.model, "prompt": args.prompt, "n": args.n}
         if args.size:
             payload["size"] = args.size
         if args.quality:
@@ -522,23 +564,34 @@ def main():
     items = result.get("data") or []
     if not items:
         sys.exit("error: gateway returned no image data:\n" + json.dumps(result)[:800])
-    item = items[0]
 
-    if item.get("b64_json"):
-        image = base64.b64decode(item["b64_json"])
-    elif item.get("url"):
-        with urllib.request.urlopen(item["url"], timeout=args.timeout) as resp:
-            image = resp.read()
+    decoded = [_decode_image(item, args.timeout) for item in items]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    count = len(decoded)
+    saved = []
+    for index, (data, item) in enumerate(zip(decoded, items), 1):
+        dest = _dest_path(args.output, index, count, _detect_ext(data), stamp)
+        saved.append((_save(data, dest), len(data), item))
+
+    elapsed = time.time() - started
+    if len(saved) == 1:
+        path, nbytes, item = saved[0]
+        print("saved: {} ({} bytes, {:.0f}s)".format(path, nbytes, elapsed))
     else:
-        sys.exit("error: image entry has neither b64_json nor url:\n" + json.dumps(item)[:400])
-
-    path = _save(image, args.output)
-    print("saved: {} ({} bytes, {:.0f}s)".format(path, len(image), time.time() - started))
+        for path, nbytes, item in saved:
+            print("saved: {} ({} bytes)".format(path, nbytes))
+        print("{:.0f}s total".format(elapsed))
     reported = {k: result[k] for k in ("quality", "size", "output_format") if result.get(k)}
     if reported:
         print("reported: " + json.dumps(reported))
-    if item.get("revised_prompt"):
-        print("revised prompt: " + item["revised_prompt"])
+    for path, nbytes, item in saved:
+        revised = item.get("revised_prompt")
+        if not revised:
+            continue
+        if len(saved) == 1:
+            print("revised prompt: " + revised)
+        else:
+            print("revised prompt ({}): {}".format(os.path.basename(path), revised))
 
 
 if __name__ == "__main__":
