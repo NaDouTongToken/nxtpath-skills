@@ -43,6 +43,10 @@ format is one `image[]` part per file, in the order given.
 
 The script path resolves relative to this skill's directory (`scripts/nxtpath_gpt_image.py` sits next to SKILL.md). After success, tell the user the printed absolute image path; if the surface supports images, display the file.
 
+### Tool timeout — read before running
+
+A generation routinely takes 1–3 minutes (`--quality high` edits are commonly 2–3 minutes). Many agent shells kill a command after a short default limit — Claude Code's Bash tool stops it after **2 minutes** unless a timeout is passed. **Run the script with a tool timeout at least as long as `--timeout`** (Claude Code: pass `timeout: 600000` on the Bash call), or run it in the background and wait for it to finish. A killed run is not free: the request has already been sent, so the generation may still run to completion and be billed, but the image is never saved.
+
 ## Parameters
 
 | Parameter | Description |

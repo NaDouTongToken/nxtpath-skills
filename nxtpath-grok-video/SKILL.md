@@ -23,6 +23,10 @@ python scripts/nxtpath_grok_video.py "the subject slowly turns toward the camera
 
 The script path resolves relative to this skill's directory (`scripts/nxtpath_grok_video.py` sits next to SKILL.md). After success, tell the user the printed absolute video path; if the surface supports video, play or display the file.
 
+### Tool timeout — read before running
+
+Video generation takes several minutes and the default `--timeout` is 900 seconds, longer than most agent shells allow for one command (Claude Code's Bash tool stops a command after **2 minutes** by default and at most 10 minutes). **Run the script in the background and wait for it to finish** (Claude Code: `run_in_background: true`, then wait for the completion notice), or pass a tool timeout of at least `--timeout` where the shell allows it. A killed run is not free: the task has already been submitted, so it may still run to completion and be billed, but the video is never downloaded.
+
 ## Parameters
 
 | Parameter | Description |

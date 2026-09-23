@@ -17,6 +17,10 @@ python scripts/nxtpath_grok_image.py "A lighthouse on a cliff at dusk, oil paint
 
 脚本路径相对本 skill 目录（`scripts/nxtpath_grok_image.py` 与 SKILL.md 同级）。成功后把打印的绝对路径告诉用户；若界面支持图片，直接展示该文件。
 
+### 工具超时——运行前必读
+
+一次生成通常要 1–3 分钟。很多 agent 的命令工具有较短的默认超时，Claude Code 的 Bash 工具不传 timeout 时 **2 分钟**就会杀掉命令。**调用本脚本时，工具超时至少设到 `--timeout` 那么长**（Claude Code：Bash 调用传 `timeout: 600000`），或者放到后台运行并等它结束。被杀掉的运行并不免费：请求已经发出，生成可能照样跑完并计费，只是图片不会落盘。
+
 ## Parameters
 
 | Parameter | Description |
