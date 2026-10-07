@@ -38,7 +38,7 @@ import uuid
 from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "https://api.nxtpath.ai"
-DEFAULT_MODEL = "openai/gpt-image-2"
+DEFAULT_MODEL = "openai/gpt-image-2.5-sunburst"
 # Image generation is slow; the official docs snippet uses timeout=600.
 DEFAULT_TIMEOUT = 600
 
@@ -516,7 +516,7 @@ def main():
     if args.n > 1 and args.model.lower().startswith("codex/"):
         sys.exit(
             "error: --n>1 is not supported for codex/* models (got {}); "
-            "openai/gpt-image-2 (the default) supports n=1..10, "
+            "openai/gpt-image-2.5-sunburst (the default) supports n=1..10, "
             "codex/gpt-image-2 does not (upstream returns 400)".format(args.model)
         )
 

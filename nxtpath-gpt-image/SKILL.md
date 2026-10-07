@@ -1,11 +1,11 @@
 ---
 name: nxtpath-gpt-image
-description: Generate or edit an image via the Nxtpath gateway using the GPT image model (gpt-image-2). Use when the user asks to generate an image, draw something, or edit an existing picture; when a CLI's built-in image generation is unusable because it is hardwired to the official backend and ignores custom gateways (Codex/Claude/Grok CLIs); or explicitly invokes /nxtpath-gpt-image. Saves the image as a local file and prints its absolute path.
+description: Generate or edit an image via the Nxtpath gateway using the GPT image model (gpt-image-2.5-sunburst). Use when the user asks to generate an image, draw something, or edit an existing picture; when a CLI's built-in image generation is unusable because it is hardwired to the official backend and ignores custom gateways (Codex/Claude/Grok CLIs); or explicitly invokes /nxtpath-gpt-image. Saves the image as a local file and prints its absolute path.
 ---
 
 # Nxtpath GPT image
 
-Call the Nxtpath gateway's GPT image API with a platform key (default model `openai/gpt-image-2`) and save the result as a local image file.
+Call the Nxtpath gateway's GPT image API with a platform key (default model `openai/gpt-image-2.5-sunburst`) and save the result as a local image file.
 
 ## Usage
 
@@ -54,8 +54,8 @@ A generation routinely takes 1–3 minutes (`--quality high` edits are commonly 
 | `prompt` (required) | What to draw, or the edit instruction for `--edit` |
 | `--edit IMAGE` | Edit that image instead of generating from scratch. Repeatable any number of times (upstream cap: 16): the first image is edited, every later one is a reference (style/content/palette), addressed in the prompt by position. Multi-image is sent as OpenAI `image[]` parts; not every lane accepts it — on a 400 about duplicate/unsupported image parameters, retry with `--model codex/gpt-image-2` or fall back to a single `--edit` and describe the references in the prompt. `codex/gpt-image-2` does **not** support generation `--n>1` (see `--n`) |
 | `-o` / `--output` | Output file path; default auto-named by timestamp, extension detected from the actual format. With `--n>1`, suffix `-1`..`-N` is inserted before the extension |
-| `--model` | Default `openai/gpt-image-2`; override via `--model` or the `NXTPATH_GPT_IMAGE_MODEL` env var. `codex/gpt-image-2` is the edit-lane fallback and does not support `n>1` |
-| `--n` | Generation only (`POST /v1/images/generations` field `n`). Integer 1..10. Default `openai/gpt-image-2` supports `n=1..10`; `codex/gpt-image-2` does **not** — `--n>1` when the model starts with `codex/` is rejected locally (upstream would 400, with two distinct messages depending on where it is rejected). Not valid with `--edit` |
+| `--model` | Default `openai/gpt-image-2.5-sunburst`; override via `--model` or the `NXTPATH_GPT_IMAGE_MODEL` env var. Other options: `openai/gpt-image-2.5-flare` (the other 2.5 variant), `openai/gpt-image-2` (previous generation), and `codex/gpt-image-2` (edit-lane fallback; does not support `n>1`) |
+| `--n` | Generation only (`POST /v1/images/generations` field `n`). Integer 1..10. Default `openai/gpt-image-2.5-sunburst` supports `n=1..10`; `codex/gpt-image-2` does **not** — `--n>1` when the model starts with `codex/` is rejected locally (upstream would 400, with two distinct messages depending on where it is rejected). Not valid with `--edit` |
 | `--size` | e.g. `1024x1024`. Some lanes decide size upstream and ignore this; trust the actual output |
 | `--quality` | e.g. `high`. The gateway may not honour it; the script prints the tier the response actually reports |
 | `--timeout` | Default 600 seconds (image generation is slow; be patient; do not conclude the run is stuck too early) |
@@ -77,5 +77,5 @@ If none of these yield a key, the script errors with setup guidance. **The API k
 ## Notes
 
 - Image generation can take tens of seconds to several minutes; that is normal. On failure the script prints the gateway's error text; `401/403` means a key problem, `404` usually means the key has no image-model permission.
-- Default is one image. Use `--n` (1..10) on `openai/gpt-image-2` to generate several in one request; every saved path is printed. `--n>1` is not available on `codex/gpt-image-2`.
+- Default is one image. Use `--n` (1..10) on `openai/gpt-image-2.5-sunburst` to generate several in one request; every saved path is printed. `--n>1` is not available on `codex/gpt-image-2`.
 - 本地 `--edit` 参考图若超过约 600KB 或长边超过 1280px，会先在临时副本上缩到长边 1024px（仍大于 800KB 则再缩到 768px）并转 JPEG 再上传，不修改用户原文件。无 Pillow 时回退系统自带缩图工具；都不可用则打印提示并仍发送原图。
