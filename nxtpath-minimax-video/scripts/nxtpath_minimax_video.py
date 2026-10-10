@@ -20,11 +20,16 @@ Credential resolution order (first hit wins):
      or its ~/.claude/skills compat scan)
 
 The API key is never printed or logged.
+
+Local images are not inlined. The script asks the upload signer (a Nxtpath
+key check in front of our OSS bucket) for a PostObject form, uploads the
+file, and sends the 24-hour signed GET URL. NXTPATH_UPLOAD_SIGNER_URL
+overrides the hard-coded signer for debugging. The signer holds the storage
+credentials; this skill never does.
 """
 
 import argparse
 import atexit
-import base64
 import json
 import os
 import re
@@ -41,14 +46,16 @@ from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "https://api.nxtpath.ai"
 DEFAULT_MODEL = "minimax/minimax-h3"
+# Production signer. Deploy prints SIGNER_URL=; keep this value in sync.
+DEFAULT_UPLOAD_SIGNER_URL = "https://nxtpathd-signer-cjtxrmbgtv.cn-hangzhou.fcapp.run"
 # Video generation is slow; timeout covers submit + poll + download.
 DEFAULT_TIMEOUT = 900
 POLL_INTERVAL = 5
 USER_AGENT = "nxtpath-minimax-video-skill/1.0"
 
-# Gateway hard-cap is 10 MiB for the whole submit body; leave headroom for
-# JSON wrapping and base64 expansion (~33%).
-MAX_BODY_BYTES = 7 * 1024 * 1024
+# Local images go to OSS instead of the 10 MiB gateway body. The signer
+# rejects anything above this cap; only then do we downscale.
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 ALLOWED_RESOLUTIONS = ("720p", "960p", "2k")
 ALLOWED_RATIOS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
@@ -163,17 +170,11 @@ def _grok_config_token():
     )
 
 
-# Empirical thresholds (same pipeline as nxtpath-grok-video): a 1.8MB /
-# 1280x1600 PNG was rejected by both grok-video and seedance i2v; the same
-# picture at 768px long-edge / 79KB JPEG passed immediately.
-_DS_TRIGGER_BYTES = 600 * 1024
-_DS_TRIGGER_EDGE = 1280
-_DS_EDGE = 1024
-_DS_EDGE_2 = 768
-_DS_KEEP_UNDER = 800 * 1024
+# Same resizers as nxtpath-grok-video. Used only when a local file is over
+# MAX_IMAGE_BYTES; smaller files are uploaded unchanged.
+_DS_EDGES = (1024, 768, 512, 384, 256)
 _DS_JPEG_Q = 85
 _DS_TEMPS = []
-_DS_EXTRA_EDGES = (768, 512, 384, 256)
 
 
 def _ds_cleanup():
@@ -354,84 +355,75 @@ def _ds_resize(src, dest, edge, quality):
     return _ds_try_magick(src, dest, edge, quality)
 
 
-def _maybe_downscale_image(path):
-    """Downscale an oversized local image onto a temp JPEG; never overwrite path."""
-    try:
-        nbytes = os.path.getsize(path)
-    except OSError:
-        return path
-    dims = _ds_probe_dims(path)
-    long_edge = max(dims) if dims else 0
-    if nbytes <= _DS_TRIGGER_BYTES and long_edge <= _DS_TRIGGER_EDGE:
-        return path
-    dest = _ds_temp_jpeg()
-    got = _ds_resize(path, dest, _DS_EDGE, _DS_JPEG_Q)
-    if not got or not os.path.isfile(dest) or os.path.getsize(dest) == 0:
-        print(
-            "warning: oversized reference image not downscaled "
-            "(no PIL / System.Drawing / sips / ImageMagick); "
-            "will retry smaller sizes or refuse if the body exceeds ~7 MiB: {}".format(
-                path
-            )
-        )
-        sys.stdout.flush()
-        return path
-    if os.path.getsize(dest) > _DS_KEEP_UNDER:
-        got2 = _ds_resize(path, dest, _DS_EDGE_2, _DS_JPEG_Q)
-        if got2:
-            got = got2
-    new_bytes = os.path.getsize(dest)
-    ow, oh = dims if dims else ("?", "?")
-    nw, nh = got
-    print(
-        "auto-downscaled: {} {}x{} {} bytes -> {}x{} {} bytes JPEG".format(
-            path, ow, oh, nbytes, nw, nh, new_bytes
-        )
-    )
-    sys.stdout.flush()
-    return dest
-
-
-IMAGE_MAGIC = [
-    (b"\x89PNG", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"RIFF", ".webp"),
-    (b"GIF8", ".gif"),
-]
-
-IMAGE_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
-
-
-def _detect_media_type(data):
-    for magic, ext in IMAGE_MAGIC:
-        if data.startswith(magic):
-            return IMAGE_MIME[ext]
-    return "image/png"
-
-
-def _encode_data_uri(path):
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except OSError as e:
-        sys.exit("error: cannot read image file: {}".format(e))
-    if not raw:
-        sys.exit("error: empty image file: {}".format(path))
-    mime = _detect_media_type(raw)
-    return "data:{};base64,{}".format(mime, base64.b64encode(raw).decode("ascii"))
-
-
 def _force_downscale(src, edge, quality):
     dest = _ds_temp_jpeg()
     got = _ds_resize(src, dest, edge, quality)
     if not got or not os.path.isfile(dest) or os.path.getsize(dest) == 0:
         return None
     return dest
+
+
+def _limit_label():
+    return "{0} MiB".format(MAX_IMAGE_BYTES // (1024 * 1024))
+
+
+def _prepare_local_image(path):
+    """Return a path of at most MAX_IMAGE_BYTES. Never modifies the caller's file."""
+    try:
+        nbytes = os.path.getsize(path)
+    except OSError as exc:
+        sys.exit("error: cannot read image file: {}".format(exc))
+    if nbytes <= MAX_IMAGE_BYTES:
+        return path
+    dims = _ds_probe_dims(path)
+    last = nbytes
+    tool_failed = True
+    for edge in _DS_EDGES:
+        dest = _force_downscale(path, edge, _DS_JPEG_Q)
+        if dest is None:
+            continue
+        tool_failed = False
+        last = os.path.getsize(dest)
+        got = _ds_probe_dims(dest) or ("?", "?")
+        ow, oh = dims if dims else ("?", "?")
+        print(
+            "auto-downscaled: {} {}x{} {} bytes -> {}x{} {} bytes JPEG (limit {})".format(
+                path, ow, oh, nbytes, got[0], got[1], last, _limit_label()
+            )
+        )
+        sys.stdout.flush()
+        if last <= MAX_IMAGE_BYTES:
+            return dest
+    if tool_failed:
+        sys.exit(
+            "error: local image is {} bytes, over the {} upload limit, "
+            "and no downscale tool is available (Pillow, System.Drawing, sips, "
+            "or ImageMagick). Shrink the image or pass a public https URL: {}".format(
+                nbytes, _limit_label(), path
+            )
+        )
+    sys.exit(
+        "error: local image is {} bytes, over the {} upload limit, "
+        "and downscaling still left {} bytes. Shrink the image or pass a "
+        "public https URL: {}".format(nbytes, _limit_label(), last, path)
+    )
+
+
+def _sniff_image(path):
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError as exc:
+        sys.exit("error: cannot read image file: {}".format(exc))
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"GIF8"):
+        return "image/gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _is_public_url(value):
@@ -441,6 +433,44 @@ def _is_public_url(value):
 
 def _is_data_url(value):
     return value.strip().lower().startswith("data:")
+
+
+def _signer_url():
+    return os.environ.get("NXTPATH_UPLOAD_SIGNER_URL", "").strip() or DEFAULT_UPLOAD_SIGNER_URL
+
+
+def _redact(text, secrets):
+    value = "" if text is None else str(text)
+    for secret in secrets:
+        if secret and len(secret) >= 8 and secret in value:
+            value = value.replace(secret, "***")
+    return value
+
+
+def _encode_multipart(fields, filename, content_type, data):
+    """Multipart body. The file part is last, which OSS PostObject requires."""
+    for _ in range(4):
+        boundary = "nxtpath" + uuid.uuid4().hex
+        if boundary.encode("ascii") not in data:
+            break
+    chunks = []
+    for name, field_value in fields.items():
+        chunks.append(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{n}\"\r\n\r\n{v}\r\n".format(
+                b=boundary, n=name, v=field_value
+            ).encode("utf-8")
+        )
+    chunks.append(
+        (
+            "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{f}\"\r\n"
+            "Content-Type: {ct}\r\n\r\n"
+        ).format(b=boundary, f=filename, ct=content_type).encode("utf-8")
+    )
+    chunks.append(data)
+    chunks.append("\r\n--{b}--\r\n".format(b=boundary).encode("ascii"))
+    body = b"".join(chunks)
+    header = "multipart/form-data; boundary=" + boundary
+    return header, body
 
 
 def _read_http_error(exc):
@@ -531,60 +561,146 @@ def _download(url, api_key, timeout):
         sys.exit("error: cannot download video: {}".format(e.reason))
 
 
-_LOCAL_TOO_LARGE = "error: 本地图过大，请缩图或改用公网 URL"
+def _signer_failure(exc, signer, api_key):
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = _redact(_read_http_error(exc), (api_key,))
+        if exc.code == 401:
+            sys.exit("error: key invalid")
+        sys.exit(
+            "error: upload signer returned HTTP {0}\n{1}".format(exc.code, detail)
+        )
+    reason = getattr(exc, "reason", exc)
+    sys.exit(
+        "error: cannot reach the upload signer at {0}: {1}. "
+        "Check the network, then retry. Debug override: NXTPATH_UPLOAD_SIGNER_URL.".format(
+            signer, reason
+        )
+    )
 
 
-def _load_image(flag, value):
-    """Return (url, original_local_path_or_None)."""
+def _request_upload(api_key, filename, content_type, size, timeout):
+    signer = _signer_url()
+    payload = json.dumps(
+        {"filename": filename, "content_type": content_type, "size": size}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        signer,
+        data=payload,
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        _signer_failure(exc, signer, api_key)
+    except urllib.error.URLError as exc:
+        _signer_failure(exc, signer, api_key)
+    except (TimeoutError, OSError) as exc:
+        _signer_failure(exc, signer, api_key)
+    try:
+        doc = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        sys.exit("error: upload signer returned a non-JSON body")
+    if not isinstance(doc, dict):
+        sys.exit("error: upload signer returned an unexpected body")
+    upload = doc.get("upload") if isinstance(doc.get("upload"), dict) else {}
+    fields = upload.get("fields") if isinstance(upload.get("fields"), dict) else None
+    get_url = doc.get("get_url")
+    post_url = upload.get("url")
+    if not isinstance(get_url, str) or not get_url.startswith("https://"):
+        sys.exit("error: upload signer did not return an https get_url")
+    if not isinstance(post_url, str) or not post_url.startswith("https://"):
+        sys.exit("error: upload signer did not return an https upload url")
+    if not fields:
+        sys.exit("error: upload signer did not return form fields")
+    return post_url, fields, get_url
+
+
+def _post_oss(post_url, fields, filename, content_type, data, timeout, api_key):
+    header, body = _encode_multipart(fields, filename, content_type, data)
+    req = urllib.request.Request(
+        post_url,
+        data=body,
+        headers={"Content-Type": header, "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    secrets = [api_key]
+    for value in fields.values():
+        if isinstance(value, str):
+            secrets.append(value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(256)
+            return
+    except urllib.error.HTTPError as exc:
+        detail = _redact(_read_http_error(exc), secrets)
+        sys.exit("error: OSS upload failed: HTTP {0}\n{1}".format(exc.code, detail))
+    except urllib.error.URLError as exc:
+        sys.exit(
+            "error: cannot reach OSS to upload the image: {0}. "
+            "Check the network, then retry.".format(exc.reason)
+        )
+    except (TimeoutError, OSError) as exc:
+        sys.exit(
+            "error: cannot reach OSS to upload the image: {0}. "
+            "Check the network, then retry.".format(exc)
+        )
+
+
+def _upload_local(path, api_key, timeout):
+    prepared = _prepare_local_image(path)
+    content_type = _sniff_image(prepared)
+    if content_type is None:
+        sys.exit(
+            "error: unsupported image type (need jpeg, png, webp, or gif): {}".format(
+                path
+            )
+        )
+    try:
+        with open(prepared, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        sys.exit("error: cannot read image file: {}".format(exc))
+    if not data:
+        sys.exit("error: empty image file: {}".format(path))
+    if len(data) > MAX_IMAGE_BYTES:
+        sys.exit(
+            "error: local image is {} bytes, over the {} upload limit: {}".format(
+                len(data), _limit_label(), path
+            )
+        )
+    filename = os.path.basename(path) or "image"
+    post_url, fields, get_url = _request_upload(
+        api_key, filename, content_type, len(data), timeout
+    )
+    file_type = fields.get("Content-Type") or content_type
+    _post_oss(post_url, fields, filename, file_type, data, timeout, api_key)
+    return get_url
+
+
+def _load_image(flag, value, api_key, timeout, dry_run):
+    """Return the image_url.url to send. Dry-run never uploads."""
     item = (value or "").strip()
     if not item:
         sys.exit("error: empty {} value".format(flag))
-    if _is_public_url(item) or _is_data_url(item):
-        return item, None
+    if _is_data_url(item):
+        sys.exit(
+            "error: data: image URLs are not accepted; pass a local file or a public http(s) URL"
+        )
+    if _is_public_url(item):
+        return item
     if not os.path.isfile(item):
         if not os.path.exists(item):
             sys.exit("error: {} file does not exist: {}".format(flag, item))
         sys.exit("error: {} is not a file: {}".format(flag, item))
-    src = os.path.abspath(item)
-    encoded = _encode_data_uri(_maybe_downscale_image(src))
-    return encoded, src
-
-
-def _body_size(payload):
-    return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-
-
-def _set_content_url(payload, index, url):
-    payload["input"]["content"][index]["image_url"]["url"] = url
-
-
-def _ensure_body_budget(payload, local_slots):
-    """Keep the JSON body under MAX_BODY_BYTES by shrinking local inlines."""
-    size = _body_size(payload)
-    if size <= MAX_BODY_BYTES:
-        return
-    if not local_slots:
-        sys.exit(_LOCAL_TOO_LARGE)
-    for edge in _DS_EXTRA_EDGES:
-        progressed = False
-        for index, src in local_slots:
-            dest = _force_downscale(src, edge, _DS_JPEG_Q)
-            if dest is None:
-                continue
-            _set_content_url(payload, index, _encode_data_uri(dest))
-            progressed = True
-        size = _body_size(payload)
-        if size <= MAX_BODY_BYTES:
-            print(
-                "auto-downscaled: request body now {} bytes (long-edge {})".format(
-                    size, edge
-                )
-            )
-            sys.stdout.flush()
-            return
-        if not progressed:
-            break
-    sys.exit(_LOCAL_TOO_LARGE)
+    if dry_run:
+        return "<oss-upload:{}>".format(os.path.basename(item))
+    return _upload_local(os.path.abspath(item), api_key, timeout)
 
 
 def _validate_resolution(value):
@@ -630,26 +746,21 @@ def _build_payload(
     model, prompt, resolution, duration, ratio, first_frame, last_frame, ref_images
 ):
     content = [{"type": "text", "text": prompt}]
-    local_slots = []
 
-    def add_image(url, src, role=None):
+    def add_image(url, role=None):
         part = {"type": "image_url", "image_url": {"url": url}}
         if role:
             part["role"] = role
         content.append(part)
-        if src:
-            local_slots.append((len(content) - 1, src))
 
     if first_frame is not None:
-        url, src = first_frame
-        add_image(url, src, "first_frame")
+        add_image(first_frame, "first_frame")
     if last_frame is not None:
-        url, src = last_frame
-        add_image(url, src, "last_frame")
-    for url, src in ref_images:
-        add_image(url, src)
+        add_image(last_frame, "last_frame")
+    for url in ref_images:
+        add_image(url)
 
-    payload = {
+    return {
         "model": model,
         "input": {"content": content},
         "parameters": {
@@ -658,8 +769,6 @@ def _build_payload(
             "ratio": ratio,
         },
     }
-    _ensure_body_budget(payload, local_slots)
-    return payload
 
 
 def _submit(root, api_key, payload, timeout):
@@ -736,20 +845,20 @@ def main():
         "--first-frame",
         metavar="PATH_OR_URL",
         default=None,
-        help="first-frame keyframe; local path (inlined as data:) or public http(s) URL",
+        help="first-frame keyframe; local path (uploaded to temporary storage) or public http(s) URL",
     )
     parser.add_argument(
         "--last-frame",
         metavar="PATH_OR_URL",
         default=None,
-        help="last-frame keyframe; local path (inlined as data:) or public http(s) URL",
+        help="last-frame keyframe; local path (uploaded to temporary storage) or public http(s) URL",
     )
     parser.add_argument(
         "--ref-image",
         metavar="PATH_OR_URL",
         action="append",
         default=[],
-        help="reference image (repeatable); local path (inlined) or public http(s) URL; exclusive with keyframes",
+        help="reference image (repeatable); local path (uploaded) or public http(s) URL; exclusive with keyframes",
     )
     parser.add_argument(
         "--resolution",
@@ -782,7 +891,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the final request-body JSON and exit without submitting",
+        help="print the final request-body JSON and exit without uploading or submitting",
     )
     args = parser.parse_args()
 
@@ -798,13 +907,28 @@ def main():
     if has_keyframe and has_ref:
         sys.exit(_MUTEX_ERROR)
 
+    api_key = ""
+    if args.dry_run:
+        root = source = None
+    else:
+        root, api_key, source = resolve_credentials()
+        print("using key from {}, gateway {}".format(source, root))
+
+    upload_timeout = max(1, min(120, args.timeout))
     first_frame = (
-        _load_image("--first-frame", args.first_frame) if args.first_frame else None
+        _load_image("--first-frame", args.first_frame, api_key, upload_timeout, args.dry_run)
+        if args.first_frame
+        else None
     )
     last_frame = (
-        _load_image("--last-frame", args.last_frame) if args.last_frame else None
+        _load_image("--last-frame", args.last_frame, api_key, upload_timeout, args.dry_run)
+        if args.last_frame
+        else None
     )
-    ref_images = [_load_image("--ref-image", item) for item in args.ref_image]
+    ref_images = [
+        _load_image("--ref-image", item, api_key, upload_timeout, args.dry_run)
+        for item in args.ref_image
+    ]
 
     payload = _build_payload(
         args.model,
@@ -820,9 +944,6 @@ def main():
     if args.dry_run:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-
-    root, api_key, source = resolve_credentials()
-    print("using key from {}, gateway {}".format(source, root))
 
     started = time.time()
     submit_timeout = max(1, min(60, args.timeout))
