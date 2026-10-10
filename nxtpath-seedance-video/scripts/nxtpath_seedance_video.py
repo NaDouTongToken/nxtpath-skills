@@ -49,10 +49,6 @@ from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "https://api.nxtpath.ai"
 DEFAULT_MODEL = "doubao/seedance-2.5"
-# seedance-2.5 fails every reference-video task upstream (2026-10-10: inline data:
-# and OSS https URL both end in Failure, while text and image references succeed),
-# so a reference video without an explicit model runs on 2.0 instead.
-VIDEO_REF_MODEL = "doubao/seedance-2.0"
 # Production signer. Deploy prints SIGNER_URL=; keep this value in sync with minimax.
 DEFAULT_UPLOAD_SIGNER_URL = "https://nxtpathd-signer-cjtxrmbgtv.cn-hangzhou.fcapp.run"
 # Video generation is slow; timeout covers submit + poll + download.
@@ -968,23 +964,22 @@ def _family_label(model):
     return label
 
 
-def _pick_model(explicit, ref_videos):
-    if explicit:
-        if ref_videos and _is_seedance_25(explicit):
-            print(
-                "warning: {} currently fails reference-video tasks upstream; "
-                "use --model {} if this run fails".format(explicit, VIDEO_REF_MODEL),
-                file=sys.stderr,
-            )
-        return explicit
-    if ref_videos:
-        print(
-            "notice: --ref-video given without --model; using {} "
-            "(seedance-2.5 reference video is failing upstream)".format(VIDEO_REF_MODEL),
-            file=sys.stderr,
+def _video_ref_duration(model, duration, ref_videos):
+    """seedance-2.5 with a reference video only runs with smart duration (-1).
+
+    2026-10-10 production: 2.5 + reference video ended in Failure with a fixed
+    duration and succeeded with -1; other models are untouched.
+    """
+    if not ref_videos or not _is_seedance_25(model):
+        return duration
+    if duration is None:
+        return SMART_DURATION
+    if duration != SMART_DURATION:
+        sys.exit(
+            "error: {} with --ref-video requires --duration -1 (smart duration); "
+            "got {}".format(_family_label(model), duration)
         )
-        return VIDEO_REF_MODEL
-    return DEFAULT_MODEL
+    return duration
 
 
 def _validate_duration(model, duration):
@@ -1214,7 +1209,7 @@ def main():
         "--duration",
         type=int,
         default=None,
-        help="seconds; 2.0: 4–15; 2.5: 4–30 or -1 (smart); omit for the gateway default",
+        help="seconds; 2.0: 4–15; 2.5: 4–30 or -1 (smart), and only -1 with --ref-video; omit for the gateway default",
     )
     parser.add_argument(
         "--ratio",
@@ -1223,10 +1218,8 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("NXTPATH_SEEDANCE_MODEL") or None,
-        help="video model (default: {}; {} when --ref-video is given)".format(
-            DEFAULT_MODEL, VIDEO_REF_MODEL
-        ),
+        default=os.environ.get("NXTPATH_SEEDANCE_MODEL", DEFAULT_MODEL),
+        help="video model (default: %(default)s)",
     )
     parser.add_argument(
         "--seed",
@@ -1265,7 +1258,7 @@ def main():
     if args.timeout <= 0:
         sys.exit("error: --timeout must be positive (got {})".format(args.timeout))
 
-    args.model = _pick_model(args.model, args.ref_video)
+    args.duration = _video_ref_duration(args.model, args.duration, args.ref_video)
     _validate_duration(args.model, args.duration)
     _validate_resolution(args.model, args.resolution)
     _reject_v2_params(

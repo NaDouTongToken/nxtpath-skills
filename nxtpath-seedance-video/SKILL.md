@@ -5,7 +5,7 @@ description: Generate a video via the Nxtpath gateway using the Seedance video m
 
 # Nxtpath Seedance video
 
-Call the Nxtpath gateway's Seedance video API (ark task line) with a platform key (default model `doubao/seedance-2.5`; `doubao/seedance-2.0` when a reference video is given) and save the result as a local mp4.
+Call the Nxtpath gateway's Seedance video API (ark task line) with a platform key (default model `doubao/seedance-2.5`) and save the result as a local mp4.
 
 ## Usage
 
@@ -41,19 +41,19 @@ Video generation takes several minutes and the default `--timeout` is 900 second
 | `--ref-image PATH_OR_URL` | Repeatable. Local file path, public `http(s)` URL, or an explicit `data:` image URL. A local file is sniffed (jpeg/png/webp/gif) and inlined as `data:<mime>;base64`. A public URL passes through. Same price as text-to-video |
 | `--ref-video PATH_OR_URL` | Repeatable. Local `.mp4` / `.mov` file, or a public `http(s)` URL. A local file is uploaded to Nxtpath temporary storage and the signed https URL is sent as `video_url`. A public URL passes through. Inline `data:` video is rejected. Different billing tier than text/image |
 | `--resolution` | Default `480p`. seedance-2.0 (including mini): `480p` / `720p` only (no `1080p`). seedance-2.5: `480p` / `720p` / `1080p`. Out of range is rejected locally before spend |
-| `--duration` | Integer seconds. Omit for the gateway default. seedance-2.0 (including mini): 4–15 (no 1–3s). seedance-2.5: 4–30, or `-1` (smart duration). Out of range is rejected locally before spend |
+| `--duration` | Integer seconds. Omit for the gateway default. seedance-2.0 (including mini): 4–15 (no 1–3s). seedance-2.5: 4–30, or `-1` (smart duration); with `--ref-video` only `-1` (the default there). Out of range is rejected locally before spend |
 | `--ratio` | Optional string, e.g. `16:9`. Passed through; omit for the upstream default |
 | `--seed` | Optional int. seedance-2.5 only; mapped to `parameters.seed`. Rejected locally on non-2.5 models |
 | `--generate-audio` | Optional bool (`true`/`false`). seedance-2.5 only; mapped to `parameters.generate_audio`. Rejected locally on non-2.5 models |
 | `--return-last-frame` | Optional bool (`true`/`false`). seedance-2.5 only; mapped to `parameters.return_last_frame`. Rejected locally on non-2.5 models |
-| `--model` | Default `doubao/seedance-2.5`, except that a run with `--ref-video` and no explicit model uses `doubao/seedance-2.0` (see below). Override via `--model` or the `NXTPATH_SEEDANCE_MODEL` env var; an explicit model always wins. Also listed: `doubao/seedance-2.0`, `doubao/seedance-2.0-mini`. On `404 MODEL_NOT_AVAILABLE` the script swaps the `doubao/` ↔ `seedance/` prefix once and retries |
+| `--model` | Default `doubao/seedance-2.5`; override via `--model` or the `NXTPATH_SEEDANCE_MODEL` env var. Also listed: `doubao/seedance-2.0`, `doubao/seedance-2.0-mini`. On `404 MODEL_NOT_AVAILABLE` the script swaps the `doubao/` ↔ `seedance/` prefix once and retries |
 | `-o` / `--output` | Output file path; default `nxtpath-seedance-<timestamp>.mp4` |
 | `--timeout` | Default 900 seconds (covers submit + poll + download; video generation is slow; be patient) |
 | `--dry-run` | Print the final request-body JSON and exit without uploading or submitting (no spend). A local video is shown as `<oss-upload:filename>`; a local image as `<inline-image:filename,N bytes>` |
 
 `doubao/seedance-2.0-mini` exists and is bucketed with the 2.0 duration/resolution family (the `"2.5"` substring check does not match). Exact mini bounds are whatever the gateway enforces — this skill does not invent numbers.
 
-Reference video on seedance-2.5 currently fails upstream: on 2026-10-10 a 2.5 task with a reference video ended in `Failure` both as inline `data:` and as a signed https URL, while 2.5 text-to-video and image references succeeded. So a `--ref-video` run without an explicit model goes to `doubao/seedance-2.0` (prints a notice), and an explicit 2.5 model with `--ref-video` prints a warning. Local media handling is the same on every model: images are inlined, videos are uploaded to temporary storage.
+**seedance-2.5 with `--ref-video` requires `--duration -1` (smart duration).** If `--duration` is omitted the script sends `-1`; any other value is rejected locally before spend. (2026-10-10 production: 2.5 + reference video failed with a fixed duration and succeeded with `-1`.) seedance-2.0 is unaffected. Local media handling is the same on every model: images are inlined, videos are uploaded to temporary storage.
 
 V2 parameters (`--seed`, `--generate-audio`, `--return-last-frame`) are seedance-2.5 only (router #2203). `omni_reference_task_type` is not exposed yet (reference-task semantics unverified).
 
