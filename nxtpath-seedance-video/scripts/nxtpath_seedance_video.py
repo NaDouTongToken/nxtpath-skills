@@ -48,7 +48,11 @@ import uuid
 from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "https://api.nxtpath.ai"
-DEFAULT_MODEL = "doubao/seedance-2.0"
+DEFAULT_MODEL = "doubao/seedance-2.5"
+# seedance-2.5 fails every reference-video task upstream (2026-10-10: inline data:
+# and OSS https URL both end in Failure, while text and image references succeed),
+# so a reference video without an explicit model runs on 2.0 instead.
+VIDEO_REF_MODEL = "doubao/seedance-2.0"
 # Production signer. Deploy prints SIGNER_URL=; keep this value in sync with minimax.
 DEFAULT_UPLOAD_SIGNER_URL = "https://nxtpathd-signer-cjtxrmbgtv.cn-hangzhou.fcapp.run"
 # Video generation is slow; timeout covers submit + poll + download.
@@ -964,6 +968,25 @@ def _family_label(model):
     return label
 
 
+def _pick_model(explicit, ref_videos):
+    if explicit:
+        if ref_videos and _is_seedance_25(explicit):
+            print(
+                "warning: {} currently fails reference-video tasks upstream; "
+                "use --model {} if this run fails".format(explicit, VIDEO_REF_MODEL),
+                file=sys.stderr,
+            )
+        return explicit
+    if ref_videos:
+        print(
+            "notice: --ref-video given without --model; using {} "
+            "(seedance-2.5 reference video is failing upstream)".format(VIDEO_REF_MODEL),
+            file=sys.stderr,
+        )
+        return VIDEO_REF_MODEL
+    return DEFAULT_MODEL
+
+
 def _validate_duration(model, duration):
     if duration is None:
         return
@@ -1200,8 +1223,10 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("NXTPATH_SEEDANCE_MODEL", DEFAULT_MODEL),
-        help="video model (default: %(default)s)",
+        default=os.environ.get("NXTPATH_SEEDANCE_MODEL") or None,
+        help="video model (default: {}; {} when --ref-video is given)".format(
+            DEFAULT_MODEL, VIDEO_REF_MODEL
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -1240,6 +1265,7 @@ def main():
     if args.timeout <= 0:
         sys.exit("error: --timeout must be positive (got {})".format(args.timeout))
 
+    args.model = _pick_model(args.model, args.ref_video)
     _validate_duration(args.model, args.duration)
     _validate_resolution(args.model, args.resolution)
     _reject_v2_params(
@@ -1288,7 +1314,7 @@ def main():
         return_last_frame=args.return_last_frame,
     )
 
-    submit_timeout = max(1, min(60, args.timeout - (time.time() - started)))
+    submit_timeout = max(1, min(180, args.timeout - (time.time() - started)))
     result = _submit(root, api_key, payload, submit_timeout)
     output = result.get("output") if isinstance(result.get("output"), dict) else {}
     task_id = output.get("task_id")

@@ -5,7 +5,7 @@ description: Generate a video via the Nxtpath gateway using the Seedance video m
 
 # Nxtpath Seedance video
 
-Call the Nxtpath gateway's Seedance video API (ark task line) with a platform key (default model `doubao/seedance-2.0`) and save the result as a local mp4.
+Call the Nxtpath gateway's Seedance video API (ark task line) with a platform key (default model `doubao/seedance-2.5`; `doubao/seedance-2.0` when a reference video is given) and save the result as a local mp4.
 
 ## Usage
 
@@ -46,12 +46,14 @@ Video generation takes several minutes and the default `--timeout` is 900 second
 | `--seed` | Optional int. seedance-2.5 only; mapped to `parameters.seed`. Rejected locally on non-2.5 models |
 | `--generate-audio` | Optional bool (`true`/`false`). seedance-2.5 only; mapped to `parameters.generate_audio`. Rejected locally on non-2.5 models |
 | `--return-last-frame` | Optional bool (`true`/`false`). seedance-2.5 only; mapped to `parameters.return_last_frame`. Rejected locally on non-2.5 models |
-| `--model` | Default `doubao/seedance-2.0`; override via `--model` or the `NXTPATH_SEEDANCE_MODEL` env var. Also listed: `doubao/seedance-2.5`, `doubao/seedance-2.0-mini`. On `404 MODEL_NOT_AVAILABLE` the script swaps the `doubao/` ↔ `seedance/` prefix once and retries |
+| `--model` | Default `doubao/seedance-2.5`, except that a run with `--ref-video` and no explicit model uses `doubao/seedance-2.0` (see below). Override via `--model` or the `NXTPATH_SEEDANCE_MODEL` env var; an explicit model always wins. Also listed: `doubao/seedance-2.0`, `doubao/seedance-2.0-mini`. On `404 MODEL_NOT_AVAILABLE` the script swaps the `doubao/` ↔ `seedance/` prefix once and retries |
 | `-o` / `--output` | Output file path; default `nxtpath-seedance-<timestamp>.mp4` |
 | `--timeout` | Default 900 seconds (covers submit + poll + download; video generation is slow; be patient) |
 | `--dry-run` | Print the final request-body JSON and exit without uploading or submitting (no spend). A local video is shown as `<oss-upload:filename>`; a local image as `<inline-image:filename,N bytes>` |
 
 `doubao/seedance-2.0-mini` exists and is bucketed with the 2.0 duration/resolution family (the `"2.5"` substring check does not match). Exact mini bounds are whatever the gateway enforces — this skill does not invent numbers.
+
+Reference video on seedance-2.5 currently fails upstream: on 2026-10-10 a 2.5 task with a reference video ended in `Failure` both as inline `data:` and as a signed https URL, while 2.5 text-to-video and image references succeeded. So a `--ref-video` run without an explicit model goes to `doubao/seedance-2.0` (prints a notice), and an explicit 2.5 model with `--ref-video` prints a warning. Local media handling is the same on every model: images are inlined, videos are uploaded to temporary storage.
 
 V2 parameters (`--seed`, `--generate-audio`, `--return-last-frame`) are seedance-2.5 only (router #2203). `omni_reference_task_type` is not exposed yet (reference-task semantics unverified).
 
